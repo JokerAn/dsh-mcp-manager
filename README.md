@@ -168,6 +168,14 @@ node test/client.test.mjs     # 渲染 / 交互 / 错误映射
 
 ---
 
+## 已知限制
+
+- **活体握手由人工确认，不是自动化验收。** 安装链路本身有自动化证据（真实 Plugin Manager 下的 `installBundle`、生成的配置文件、`listBundles` 记录、推导命令 `npx -y <pkg>` 实测 `exit 0` 启动）；但「安装后真实 Loader 观察到该行 `active`，且工具进入模型工具表」这一步，是在真实桌面上**手工安装并确认**的（即截图中的「已连接」与 `mcp__frontend-code-skimmer__*` 工具），**未**由自动化用例覆盖 —— 自动化环境中的 `phase` 是从磁盘推导的投影，不构成握手证据。
+- **Host 侧改动必须重启应用才生效。** 插件代码由 Node ESM 按 URL 缓存；`remove` + `install`、`disable → enable` 都不会重新导入源码。Client 侧改动刷新页面即可。
+- **自建 harness 请显式设定 `DSH_HOME`。** 未设置时它会回退到真实 `~/.dsh`，从而在 `~/.dsh/mcp-servers/` 下留下没有对应插件行的孤儿目录。插件自身按 `$DSH_HOME` 正确解析路径，这属于 harness 的卫生问题。
+
+---
+
 ## License
 
 [MIT](LICENSE)
