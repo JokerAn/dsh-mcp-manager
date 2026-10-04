@@ -67,18 +67,19 @@ DeepSeek Harness 原生已经能读写文件、跑 bash、抓网页、搜网络 
 
 前提：已安装 DeepSeek Harness 桌面端。
 
-```bash
-# 把仓库克隆到你喜欢的位置
-git clone git@github.com:JokerAn/dsh-mcp-manager.git
-cd dsh-mcp-manager
-```
+**不需要克隆仓库**，直接在 GUI 里安装：
 
-然后在 Harness 里让 Agent 执行（或用 `plugin_manager` 工具）：
+1. 打开 **插件** 页面（左侧边栏）
+2. 点右上角 **+ 添加插件**
+3. 在输入框里粘贴本仓库地址：
 
-```
-plugin_manager install_bundle
-  target: /绝对路径/dsh-mcp-manager
-```
+   ```
+   https://github.com/JokerAn/dsh-mcp-manager
+   ```
+
+4. 点 **安装**
+
+![添加插件：粘贴仓库地址即可](docs/images/00-install-add-plugin.png)
 
 安装成功后：
 
@@ -88,6 +89,18 @@ plugin_manager install_bundle
 ![MCP 标签页](docs/images/03-mcp-tab.jpg)
 
 > 桌面端当前托管的 MCP 目录是 `~/.dsh/mcp-servers/`，每安装一个服务器就会在其中生成一个独立的小 bundle。
+
+<details>
+<summary>其他安装方式</summary>
+
+如果你已经把仓库克隆到了本地，也可以让 Agent 用 `plugin_manager` 工具直接装本地目录：
+
+```
+plugin_manager install_bundle
+  target: /绝对路径/dsh-mcp-manager
+```
+
+</details>
 
 ---
 
