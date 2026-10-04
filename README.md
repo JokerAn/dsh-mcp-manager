@@ -1,8 +1,33 @@
 # dsh-mcp-manager
 
-**给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 桌面端的 MCP 服务器管理器** —— 活体注册表浏览、卡片式一键安装、自定义 stdio / Streamable HTTP 接入。
+**DeepSeek Harness（DSH）的 MCP 总管理器** —— 一个页面管好你所有的 MCP 服务器。
 
-搜索真实的上游 MCP 注册表，点一下卡片就把服务器装好；装完它的工具立刻以 `mcp__<名称>__<工具>` 出现在模型手里。
+装 MCP、找 MCP、开关 MCP、改 MCP 参数，全在 **设置 → 内置插件 → MCP** 一个标签页里完成，不用再手写 `cordis.patch.yml`。
+
+[![dsh-plugin](https://img.shields.io/badge/topic-dsh--plugin-blue)](https://github.com/topics/dsh-plugin)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+| 你想做的事 | 在这里怎么做 |
+|---|---|
+| **装一个 MCP** | 公共目录里搜一下，点卡片上的「安装」 |
+| **装 npm 上的 MCP** | 输入 `@scope/包名`，卡片会从包的 `bin` 自动推导启动命令 |
+| **找 MCP** | 直接搜官方 MCP Registry 与 npm，可翻页、可刷新 |
+| **开关 / 改参数 / 删除** | 卡片上的开关、齿轮、垃圾桶；改完保存即生效 |
+| **接自己的私有 MCP** | 「+ 添加」，填 stdio 或 流式 HTTP 即可 |
+
+装好的服务器，其工具会立刻以 `mcp__<名称>__<工具>` 注册给模型，**无需重启**。
+
+**目录** · [30 秒安装](#30-秒安装) · [为什么需要它](#为什么需要它) · [特性](#特性) · [安装](#安装) · [使用](#使用) · [工作原理](#工作原理) · [开发](#开发) · [已知限制](#已知限制)
+
+### 30 秒安装
+
+在 DSH 的 **插件** 页面点 **+ 添加插件**，粘贴这一行，点安装：
+
+```
+https://github.com/JokerAn/dsh-mcp-manager
+```
+
+装完**完全退出并重新打开** DSH，即可在 **设置 → 内置插件 → MCP** 看到它。详见 [安装](#安装)。
 
 ![公共目录与我的服务器](docs/images/01-catalog-and-servers.jpg)
 
@@ -186,6 +211,22 @@ node test/client.test.mjs     # 渲染 / 交互 / 错误映射
 - **活体握手由人工确认，不是自动化验收。** 安装链路本身有自动化证据（真实 Plugin Manager 下的 `installBundle`、生成的配置文件、`listBundles` 记录、推导命令 `npx -y <pkg>` 实测 `exit 0` 启动）；但「安装后真实 Loader 观察到该行 `active`，且工具进入模型工具表」这一步，是在真实桌面上**手工安装并确认**的（即截图中的「已连接」与 `mcp__frontend-code-skimmer__*` 工具），**未**由自动化用例覆盖 —— 自动化环境中的 `phase` 是从磁盘推导的投影，不构成握手证据。
 - **Host 侧改动必须重启应用才生效。** 插件代码由 Node ESM 按 URL 缓存；`remove` + `install`、`disable → enable` 都不会重新导入源码。Client 侧改动刷新页面即可。
 - **自建 harness 请显式设定 `DSH_HOME`。** 未设置时它会回退到真实 `~/.dsh`，从而在 `~/.dsh/mcp-servers/` 下留下没有对应插件行的孤儿目录。插件自身按 `$DSH_HOME` 正确解析路径，这属于 harness 的卫生问题。
+
+---
+
+## 给你的 DSH 插件打上 `dsh-plugin` topic
+
+DSH 的插件发现机制走 GitHub topic：**任何公开仓库只要打上 `dsh-plugin`，就会出现在插件画廊里。**
+
+给你自己的插件加上它，别人就能搜到你：
+
+```bash
+gh repo edit <你的用户名>/<仓库名> --add-topic dsh-plugin
+```
+
+本仓库同时打了这些 topic，便于按关键词被检索到：
+
+`dsh-plugin` · `deepseek-harness` · `dsh` · `mcp` · `mcp-server` · `mcp-client` · `model-context-protocol` · `cordis` · `deepseek` · `plugin`
 
 ---
 
