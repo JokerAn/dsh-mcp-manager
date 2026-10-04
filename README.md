@@ -123,7 +123,7 @@ graph LR
   UI[Client 半边<br/>settings.plugins.tab] -->|Connection RPC<br/>/dsh-mcp-rpc| HOST[Host 半边<br/>index.js]
   HOST -->|作者文件| FS[~/.dsh/mcp-servers/&lt;id&gt;/]
   HOST -->|installBundle / setBundleEnabled / removeBundle| PM[真实 Plugin Manager]
-  REC[官方 MCP Registry] -.->|搜活体索| HOST
+  REC[官方 MCP Registry] -.->|搜索活体注册表| HOST
   NPM[npm registry] -.->|搜索 / 直查| HOST
   PM --> REACT[DSH Loader]
   REACT --> MC[官方 dsh-mcp-client]
