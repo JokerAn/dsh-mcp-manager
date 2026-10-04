@@ -1,0 +1,114 @@
+[
+  {
+    "id": "everything",
+    "title": {
+      "zh": "Everything 测试服务器",
+      "en": "Everything (test server)"
+    },
+    "description": {
+      "zh": "官方参考实现，暴露 prompt、resource 与 tool，无需任何凭据即可安装和联通。",
+      "en": "Official reference implementation exposing prompts, resources and tools; installs and connects with no credentials at all."
+    },
+    "category": "dev",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-everything"
+    ],
+    "origin": "seed",
+    "packageId": "npm:@modelcontextprotocol/server-everything",
+    "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/everything"
+  },
+  {
+    "id": "filesystem",
+    "title": {
+      "zh": "文件系统",
+      "en": "Filesystem"
+    },
+    "description": {
+      "zh": "读写允许目录下的文件（官方参考服务器）。安装后请把参数里的目录改成你自己的路径。",
+      "en": "Read and write files under allowed directories (official reference server). Point the directory argument at your own path after install."
+    },
+    "category": "files",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-filesystem",
+      "/path/to/allowed/directory"
+    ],
+    "origin": "seed",
+    "packageId": "npm:@modelcontextprotocol/server-filesystem",
+    "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem"
+  },
+  {
+    "id": "memory",
+    "title": {
+      "zh": "记忆",
+      "en": "Memory"
+    },
+    "description": {
+      "zh": "基于知识图谱的持久记忆服务器（官方参考服务器）。",
+      "en": "Knowledge-graph based persistent memory server (official reference server)."
+    },
+    "category": "data",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-memory"
+    ],
+    "origin": "seed",
+    "packageId": "npm:@modelcontextprotocol/server-memory",
+    "envKeys": [
+      {
+        "key": "MEMORY_FILE_PATH",
+        "label": {
+          "zh": "记忆文件路径",
+          "en": "Memory file path"
+        },
+        "required": false,
+        "placeholder": "~/.dsh/mcp-memory.json"
+      }
+    ],
+    "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/memory"
+  },
+  {
+    "id": "sequential-thinking",
+    "title": {
+      "zh": "顺序思考",
+      "en": "Sequential thinking"
+    },
+    "description": {
+      "zh": "把复杂问题拆成可修订的思考步骤（官方参考服务器）。",
+      "en": "Break a complex problem into revisable reasoning steps (official reference server)."
+    },
+    "category": "reasoning",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-sequential-thinking"
+    ],
+    "origin": "seed",
+    "packageId": "npm:@modelcontextprotocol/server-sequential-thinking",
+    "docs": "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking"
+  },
+  {
+    "id": "deepwiki",
+    "title": {
+      "zh": "DeepWiki 远程",
+      "en": "DeepWiki (remote)"
+    },
+    "description": {
+      "zh": "对任意 GitHub 仓库提问，无需安装任何本地进程。",
+      "en": "Ask questions about any GitHub repository; nothing to install locally."
+    },
+    "category": "docs",
+    "transport": "streamable-http",
+    "url": "https://mcp.deepwiki.com/mcp",
+    "origin": "seed",
+    "docs": "https://docs.devin.ai/work-with-devin/deepwiki-mcp"
+  }
+]

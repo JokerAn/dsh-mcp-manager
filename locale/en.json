@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "MCP Manager",
+    "description": "Manage MCP servers as cards: custom stdio / Streamable HTTP endpoints, plus one-click installs from the public MCP catalog."
+  }
+}

@@ -1,0 +1,16 @@
+# Internal working files — not part of the published plugin
+CONTRACT.md
+DEBUG-INSTALL-STATUS.md
+.research/
+
+# Agent/editor state
+.agent
+.agent-teams
+.agent/*
+node_modules
+
+# OS / editor noise
+.DS_Store
+.idea
+.vscode
+*.log

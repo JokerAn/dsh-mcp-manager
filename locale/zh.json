@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "MCP 管理",
+    "description": "卡片式管理 MCP 服务器：自定义 stdio / 流式 HTTP 接入，从公共 MCP 目录一键安装。"
+  }
+}

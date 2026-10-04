@@ -1,0 +1,14 @@
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="MCP Manager">
+  <rect x="4" y="4" width="28" height="28" rx="9" fill="url(#dshmcp-icon-bg)" />
+  <path d="M12.5 22.5V14.5C12.5 12.84 13.84 11.5 15.5 11.5H20.5C22.16 11.5 23.5 12.84 23.5 14.5V15.5" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" />
+  <path d="M23.5 20.5V15.5" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" />
+  <circle cx="23.5" cy="23.5" r="3.5" fill="#FFFFFF" />
+  <circle cx="12.5" cy="25.5" r="2.5" fill="#9FD0FF" />
+  <path d="M15.5 25.5H20" stroke="#9FD0FF" stroke-width="2" stroke-linecap="round" />
+  <defs>
+    <linearGradient id="dshmcp-icon-bg" x1="6" y1="5" x2="31" y2="32" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3B82F6" />
+      <stop offset="1" stop-color="#145AF3" />
+    </linearGradient>
+  </defs>
+</svg>

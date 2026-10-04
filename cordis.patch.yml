@@ -1,0 +1,15 @@
+# @local/dsh-mcp-manager — bundle patch layer.
+#
+# Rows must be wrapped in `insert:`; a bare new id is treated as an override of
+# an existing row, warns `entry "<id>" not found`, and is silently dropped.
+#
+# The Host half (index.js) owns the /dsh-mcp-rpc Connection channel and drives
+# the real Plugin Manager to author and load one configuration-only bundle per
+# managed MCP server. The Client half (client/client.js, a dsh.client row)
+# renders the MCP management tab in Settings → Plugins.
+#
+# No `inject` key here: index.js's own exported `inject` is the declaration the
+# Loader reads, and repeating it would create a second place to keep in sync.
+- insert:
+    - id: dsh-mcp-manager
+      name: '@local/dsh-mcp-manager'
