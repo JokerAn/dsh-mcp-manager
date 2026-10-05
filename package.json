@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-mcp-manager",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "description": "DeepSeek Harness 桌面端 MCP 管理插件：卡片式服务器管理、自定义 stdio/Streamable HTTP 接入、公共 MCP 目录一键安装。",
