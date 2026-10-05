@@ -115,6 +115,9 @@ window.__ModuleLoader__.load({
       slashGroup: 'MCP 服务器',
       slashPrompt: '请使用 MCP 服务器「{name}」提供的工具（工具名前缀 {prefix}）完成任务：{task}',
       slashPromptEmpty: '请使用 MCP 服务器「{name}」提供的工具（工具名前缀 {prefix}）来完成我接下来的任务。',
+      slashUnavailable: '斜杠菜单没有挂上：注册输入触发器失败，/ 列表里不会出现 MCP 服务器。',
+      slashDegraded: '斜杠菜单取不到服务器列表：{message}',
+      slashReady: '斜杠菜单已就绪：输入 / 可以看到已安装的 MCP 服务器。',
       enable: '启用',
       disable: '停用',
       edit: '编辑',
@@ -261,6 +264,9 @@ window.__ModuleLoader__.load({
       slashGroup: 'MCP servers',
       slashPrompt: 'Use the tools of the MCP server "{name}" (tool-name prefix {prefix}) to complete this task: {task}',
       slashPromptEmpty: 'Use the tools of the MCP server "{name}" (tool-name prefix {prefix}) to complete my next task.',
+      slashUnavailable: 'The / menu is not mounted: registering the input-trigger source failed, so MCP servers cannot appear in it.',
+      slashDegraded: 'The / menu could not read the server list: {message}',
+      slashReady: 'The / menu is ready: type / to see the installed MCP servers.',
       enable: 'Enable',
       disable: 'Disable',
       edit: 'Edit',
@@ -1975,6 +1981,59 @@ window.__ModuleLoader__.load({
       'compact', 'export', 'feedback', 'file', 'goal', 'model', 'permission', 'plan',
     ]);
 
+    /**
+     * Why the `/` menu may be missing its MCP rows (§10). Registration and the
+     * server directory write here, and the settings tab renders the result: the
+     * trigger pipeline only logs, and the plugin's own client half must not fail
+     * silently again.
+     */
+    const slashStatus = { registered: false, reason: '', error: null };
+
+    /** Contained diagnostics: reporting must never become the failure. */
+    function slashLog(level, message, detail) {
+      try {
+        if (typeof console === 'undefined' || typeof console[level] !== 'function') return;
+        if (detail === undefined) console[level]('[dsh-mcp-manager] ' + message);
+        else console[level]('[dsh-mcp-manager] ' + message, detail);
+      } catch (error) {
+        // Ignored on purpose.
+      }
+    }
+
+    /**
+     * The single line the settings tab shows while the `/` source is unhealthy.
+     * A context without `ctx.get` is simply not a trigger-pipeline client (older
+     * builds, non-Web surfaces, the test harness), which is not a fault to
+     * report; a healthy source with a working directory reports nothing. Pure:
+     * the tab renders often, so the logging lives at the two writers below.
+     *
+     * @param t - dictionary-bound translate thunk.
+     * @returns the line, or null when there is nothing to say.
+     */
+    function slashHealthNotice(t) {
+      if (!slashStatus.registered) {
+        if (slashStatus.reason !== 'register-failed') return null;
+        return t('slashUnavailable');
+      }
+      if (slashStatus.error !== null) {
+        const error = asRecord(slashStatus.error);
+        const message = asString(error.message) || asString(error.code) || 'unknown';
+        return t('slashDegraded', { message });
+      }
+      return null;
+    }
+
+    /** Record one server-list failure, logging it only when it first appears (or changes). */
+    function setSlashError(error) {
+      const next = asRecord(error);
+      const previous = asRecord(slashStatus.error);
+      const same = asString(next.message) === asString(previous.message) && asString(next.code) === asString(previous.code);
+      slashStatus.error = next;
+      if (same) return;
+      const message = asString(next.message) || asString(next.code) || 'unknown';
+      slashLog('warn', 'the / menu could not read the server list: ' + message);
+    }
+
     /** The mcp-client's published tool-name shape, quoted verbatim to the model. */
     function toolPrefixOf(serverName) {
       return 'mcp__' + serverName + '__';
@@ -2192,9 +2251,17 @@ window.__ModuleLoader__.load({
               if (result && result.ok) {
                 cached = asArray(asRecord(result.value).servers).map(normalizeServer);
                 cachedAt = Date.now();
+                slashStatus.error = null;
+              } else {
+                // Recorded, never thrown: the menu stays empty but the settings
+                // tab can say why.
+                setSlashError(result && result.error);
               }
               return settle();
-            }, () => settle());
+            }, (error) => {
+              setSlashError({ code: 'network', message: textOf(error) });
+              return settle();
+            });
           return inflight;
         },
         invalidate() {
@@ -2262,21 +2329,27 @@ window.__ModuleLoader__.load({
      *
      * The source is optional infrastructure: it mounts only when the Web client
      * exposes the input-trigger pipeline, and every callback is contained so a
-     * failure can never break the composer. It is ordered after the host command
-     * registry (0) and the skill source (2), so `/plan` and a skill whose name
-     * collides with a server always win the Enter arbitration; a line whose
-     * first token names no installed server is not claimed at all.
+     * failure can never break the composer.
+     *
+     * Mounting is **reactive** on purpose. This plugin declares
+     * `immediately: true`, and the boot manifest puts it in a later batch than
+     * `dsh-client-ui-input-trigger`; a one-shot `ctx.get('inputTriggers')` at
+     * apply time therefore depends on activation order, and a miss used to
+     * leave the menu silently empty. `ctx.inject(['inputTriggers'], …)` runs the
+     * callback as soon as the service exists and again if it is replaced — the
+     * same shape `ui-conversation` uses to reach `commandUi`.
      *
      * @param ctx - the browser plugin context.
      * @param client - the RPC client built by `createClient`.
      * @param t - dictionary-bound translate thunk.
-     * @returns true when the source was registered.
+     * @returns true when a registration path was taken.
      */
     function registerMcpSlashSource(ctx, client, t) {
       const get = typeof ctx.get === 'function' ? ctx.get.bind(ctx) : null;
-      if (get === null) return false;
-      const inputTriggers = get('inputTriggers');
-      if (!inputTriggers || typeof inputTriggers.registerSource !== 'function') return false;
+      if (get === null) {
+        slashStatus.reason = 'no-get';
+        return false;
+      }
       const directory = createSlashDirectory(client);
       const reserved = createSlashReservations(ctx);
 
@@ -2289,22 +2362,29 @@ window.__ModuleLoader__.load({
         },
         async candidates(session, request) {
           const req = asRecord(request);
-          const servers = await directory.load();
-          if (req.signal && req.signal.aborted === true) return [];
-          return rankSlashServers(servers, slashQueryName(req.query))
-            .slice(0, SLASH_MAX_ROWS)
-            .map((server) => {
-              const row = {
-                name: asString(server.name),
-                section: t('slashGroup'),
-                description: slashServerDetail(t, server),
-              };
-              // A custom display name becomes the row title, and the server name
-              // stays visible as the alias the user can also type.
-              const label = asString(server.label);
-              if (label && label.toLowerCase() !== row.name.toLowerCase()) row.label = label;
-              return row;
-            });
+          try {
+            const servers = await directory.load();
+            if (req.signal && req.signal.aborted === true) return [];
+            return rankSlashServers(servers, slashQueryName(req.query))
+              .slice(0, SLASH_MAX_ROWS)
+              .map((server) => {
+                const row = {
+                  name: asString(server.name),
+                  section: t('slashGroup'),
+                  description: slashServerDetail(t, server),
+                };
+                // A custom display name becomes the row title, and the server name
+                // stays visible as the alias the user can also type.
+                const label = asString(server.label);
+                if (label && label.toLowerCase() !== row.name.toLowerCase()) row.label = label;
+                return row;
+              });
+          } catch (error) {
+            // The pipeline would only log this; record it so the settings tab
+            // can show it too.
+            setSlashError({ code: 'internal', message: textOf(error) });
+            return [];
+          }
         },
         matchEnter(session, line) {
           const sessionId = asString(asRecord(session).sessionId);
@@ -2330,17 +2410,59 @@ window.__ModuleLoader__.load({
         },
       };
 
-      if (typeof ctx.effect !== 'function') {
-        inputTriggers.registerSource(source);
+      /** Register the source against one context that provides the pipeline. */
+      function mount(scope) {
+        const triggers = scope.get('inputTriggers');
+        if (!triggers || typeof triggers.registerSource !== 'function') {
+          slashStatus.registered = false;
+          slashStatus.reason = 'no-service';
+          return;
+        }
+        if (typeof scope.effect !== 'function') {
+          try {
+            triggers.registerSource(source);
+            slashStatus.registered = true;
+            slashStatus.reason = '';
+          } catch (error) {
+            slashStatus.registered = false;
+            slashStatus.reason = 'register-failed';
+            slashLog('warn', 'could not register the / menu source', error);
+          }
+          return;
+        }
+        try {
+          scope.effect(() => {
+            const unregister = triggers.registerSource(source);
+            slashStatus.registered = true;
+            slashStatus.reason = '';
+            slashLog('info', t('slashReady'));
+            return () => {
+              if (typeof unregister === 'function') unregister();
+              directory.invalidate();
+              slashStatus.registered = false;
+            };
+          }, 'dsh-mcp-manager: slash source');
+        } catch (error) {
+          slashStatus.registered = false;
+          slashStatus.reason = 'register-failed';
+          slashLog('warn', 'could not register the / menu source', error);
+        }
+      }
+
+      if (typeof ctx.inject === 'function') {
+        ctx.inject(['inputTriggers'], (scope) => mount(scope));
         return true;
       }
-      ctx.effect(() => {
-        const unregister = inputTriggers.registerSource(source);
-        return () => {
-          if (typeof unregister === 'function') unregister();
-          directory.invalidate();
-        };
-      }, 'dsh-mcp-manager: slash source');
+      // Fallback for a context without the reactive inject form (tests, older
+      // clients): one synchronous attempt, reported through `slashStatus`.
+      if (!get('inputTriggers')) {
+        slashStatus.reason = 'no-service';
+        return false;
+      }
+      mount({
+        get,
+        effect: typeof ctx.effect === 'function' ? ctx.effect.bind(ctx) : null,
+      });
       return true;
     }
 
@@ -2532,6 +2654,8 @@ window.__ModuleLoader__.load({
       }, [catalogSource, catalogDebounced, catalogRefreshToken]);
 
       const showNotice = (tone, text, detail) => setNotice({ tone, text: asString(text), detail: asString(detail) });
+      // §10: the tab is the only place a broken `/` source can explain itself.
+      const slashHealth = (translate) => slashHealthNotice(translate);
       const failWith = (error) => {
         const parts = errorParts(t, error);
         showNotice('error', parts.text, parts.detail);
@@ -2764,6 +2888,11 @@ window.__ModuleLoader__.load({
           closeLabel: t('close'),
           onClose: () => setNotice(null),
         }) : null,
+        slashHealth(t)
+          ? h('div', { className: 'dshmcp-notice', style: styles.notice, key: 'slash-health' },
+            h('span', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } },
+              h('span', null, slashHealth(t))))
+          : null,
         h(CatalogSection, {
           t,
           locale,
@@ -2948,6 +3077,8 @@ window.__ModuleLoader__.load({
       createSlashDirectory,
       createSlashReservations,
       registerMcpSlashSource,
+      slashHealthNotice,
+      slashStatus,
       toolPrefixOf,
       fallbackReservedCommands: FALLBACK_RESERVED_COMMANDS,
     });

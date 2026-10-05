@@ -2138,4 +2138,67 @@ assert.equal(
 );
 log('slash: registration, menu rows and the Enter path all behave');
 
+// -- reactive mounting and the health line -----------------------------------
+// The plugin declares `immediately: true` and loads in a later batch than the
+// trigger package, so a one-shot get() at apply time depends on activation
+// order. `ctx.inject` must be preferred when the context offers it.
+const reactive = boot({ rpc: async () => ({ ok: true, value: { servers: [] } }) }).moduleExports.internals;
+const injectCalls = [];
+const mountCallbacks = [];
+const reactiveSources = [];
+const reactiveClient = { list: async () => ({ ok: true, value: { servers: SERVER_ROWS } }) };
+assert.equal(
+  reactive.registerMcpSlashSource({
+    get: () => undefined,
+    effect: (callback) => { callback(); return () => {}; },
+    inject: (deps, callback) => { injectCalls.push(deps); mountCallbacks.push(callback); },
+  }, reactiveClient, tSlash),
+  true,
+  'a context with reactive inject takes that path',
+);
+assert.deepEqual(plain(injectCalls[0]), ['inputTriggers'], 'the source waits on the trigger service');
+assert.equal(reactiveSources.length, 0, 'nothing registers before the service exists');
+assert.equal(reactive.slashStatus.registered, false, 'health is not claimed before the mount');
+assert.equal(reactive.slashHealthNotice(tSlash), null, 'a pending reactive mount reports nothing');
+
+mountCallbacks[0]({
+  get: () => ({ registerSource: (source) => { reactiveSources.push(source); return () => {}; } }),
+  effect: (callback) => { callback(); return () => {}; },
+});
+assert.equal(reactiveSources.length, 1, 'the source mounts when the service arrives');
+assert.equal(reactiveSources[0].trigger, '/', 'the mounted source owns the slash trigger');
+assert.equal(reactive.slashStatus.registered, true, 'health records the mount');
+assert.equal(reactive.slashHealthNotice(tSlash), null, 'a healthy source reports nothing');
+
+// A mount the pipeline itself refuses must be visible, not silent.
+const refused = boot({ rpc: async () => ({ ok: true, value: { servers: [] } }) }).moduleExports.internals;
+refused.registerMcpSlashSource({
+  get: () => ({ registerSource: () => { throw new Error('slash source "/mcp" is already registered'); } }),
+  effect: (callback) => { callback(); return () => {}; },
+}, { list: async () => ({ ok: true, value: {} }) }, tSlash);
+assert.equal(refused.slashStatus.reason, 'register-failed', 'a refused mount is recorded');
+assert.equal(refused.slashHealthNotice(tSlash), zhDict.slashUnavailable, 'the tab explains a refused mount');
+
+// A dead server list must be visible too, and must clear once a load succeeds.
+const health = boot({ rpc: async () => ({ ok: true, value: { servers: [] } }) }).moduleExports.internals;
+let healthy = false;
+const healthDirectory = health.createSlashDirectory({
+  list: async () => (healthy ? { ok: true, value: { servers: SERVER_ROWS } } : { ok: false, error: { code: 'network', message: '连不上宿主' } }),
+});
+health.slashStatus.registered = true;
+await healthDirectory.load();
+assert.ok(health.slashHealthNotice(tSlash).includes('连不上宿主'), 'the tab explains a failed server list');
+healthy = true;
+await healthDirectory.load(true);
+assert.equal(health.slashHealthNotice(tSlash), null, 'a recovered list clears the health line');
+
+// The registered tab renders that line, so a broken `/` source is diagnosable
+// from Settings alone.
+const healthBoot = boot({ rpc: async () => ({ ok: true, value: { servers: [] } }) });
+healthBoot.moduleExports.internals.slashStatus.registered = true;
+healthBoot.moduleExports.internals.slashStatus.error = { code: 'network', message: '连不上宿主' };
+const healthHtml = healthBoot.react.render(healthBoot.element);
+assert.ok(healthHtml.includes('连不上宿主'), 'the MCP tab surfaces the slash-source failure');
+log('slash: reactive mounting works and failures are visible without devtools');
+
 console.log('client tests passed');
