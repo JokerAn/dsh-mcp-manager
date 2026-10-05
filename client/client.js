@@ -2099,26 +2099,45 @@ window.__ModuleLoader__.load({
      * The host command directory is the authoritative list; a client that
      * cannot reach it falls back to the shipped names.
      *
+     * `ctx.get(name)` is the un-gated read. Reading `ctx.remote` as a property
+     * throws `can not get property "remote" without inject` in cordis unless the
+     * fiber injected it, and this plugin's activation gate (`slots`, `connection`,
+     * `locale`) must not grow a service the client may not offer — so the
+     * directory is resolved through `get` and every failure degrades to the
+     * fallback instead of escaping into the Enter adjudication.
+     *
      * @param ctx - the browser plugin context.
      * @returns `(sessionId) => Promise<Set<string>>` of lowercase names.
      */
     function createSlashReservations(ctx) {
+      const get = typeof ctx.get === 'function' ? ctx.get.bind(ctx) : null;
       const cache = new Map();
+      /** The host command directory, or null when this client exposes none. */
+      function commandDirectory() {
+        if (get === null) return null;
+        let commands = get('remote.commands');
+        if (commands === undefined) commands = asRecord(get('remote')).commands;
+        return asRecord(commands);
+      }
       function fetch(sessionId) {
-        const commands = asRecord(asRecord(asRecord(ctx).remote).commands);
-        if (typeof commands.list !== 'function') return Promise.resolve(new Set(FALLBACK_RESERVED_COMMANDS));
-        return Promise.resolve()
-          .then(() => commands.list(sessionId))
-          .then((result) => {
-            const names = new Set(FALLBACK_RESERVED_COMMANDS);
-            if (result && result.ok === true) {
-              for (const raw of asArray(result.value)) {
-                const name = asString(asRecord(raw).name).toLowerCase();
-                if (name) names.add(name);
+        // Promise-wrapped so a throwing service accessor becomes a rejection, not
+        // a synchronous throw out of `matchEnter` and into the adjudication.
+        return Promise.resolve().then(() => {
+          const commands = commandDirectory();
+          if (commands === null || typeof commands.list !== 'function') return new Set(FALLBACK_RESERVED_COMMANDS);
+          return Promise.resolve()
+            .then(() => commands.list(sessionId))
+            .then((result) => {
+              const names = new Set(FALLBACK_RESERVED_COMMANDS);
+              if (result && result.ok === true) {
+                for (const raw of asArray(result.value)) {
+                  const name = asString(asRecord(raw).name).toLowerCase();
+                  if (name) names.add(name);
+                }
               }
-            }
-            return names;
-          }, () => new Set(FALLBACK_RESERVED_COMMANDS));
+              return names;
+            }, () => new Set(FALLBACK_RESERVED_COMMANDS));
+        });
       }
       return function reserved(sessionId) {
         const hit = cache.get(sessionId);

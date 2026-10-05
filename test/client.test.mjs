@@ -1910,17 +1910,13 @@ log('slash: ranking and command-line parsing behave');
 assert.ok(slash.fallbackReservedCommands.includes('plan'), 'the shipped command names are the fallback');
 assert.ok(slash.fallbackReservedCommands.includes('file'), 'the client-side /file contribution is covered too');
 const reservedCalls = [];
-const reservedCtx = {
-  remote: {
-    commands: {
-      list: async (sessionId) => {
-        reservedCalls.push(sessionId);
-        return { ok: true, value: [{ name: 'git' }, { name: 'plan' }] };
-      },
-    },
-  },
+const reservedList = async (sessionId) => {
+  reservedCalls.push(sessionId);
+  return { ok: true, value: [{ name: 'git' }, { name: 'plan' }] };
 };
-const reservedFor = slash.createSlashReservations(reservedCtx);
+const reservedFor = slash.createSlashReservations({
+  get: (name) => (name === 'remote.commands' ? { list: reservedList } : undefined),
+});
 const reservedNames = await reservedFor('s1');
 assert.ok(reservedNames.has('git'), 'a plugin-registered host command is reserved');
 assert.ok(reservedNames.has('plan'), 'the fallback names survive the merge');
@@ -1928,32 +1924,62 @@ await reservedFor('s1');
 assert.equal(reservedCalls.length, 1, 'the host roster is cached per session');
 await reservedFor('s2');
 assert.equal(reservedCalls.length, 2, 'a different session gets its own roster');
+
+// `remote.commands` may only be reachable through the parent service.
+const nestedFor = slash.createSlashReservations({
+  get: (name) => (name === 'remote' ? { commands: { list: async () => ({ ok: true, value: [{ name: 'git' }] }) } } : undefined),
+});
+assert.ok((await nestedFor('s1')).has('git'), 'a directory reached through remote.commands is used');
+
 // A concurrent call must join the pending fetch, never read the fallback early.
 const slowCalls = [];
 const slowFor = slash.createSlashReservations({
-  remote: {
-    commands: {
-      list: (sessionId) => {
-        slowCalls.push(sessionId);
-        return new Promise((resolve) => setTimeout(() => resolve({ ok: true, value: [{ name: 'git' }] }), 5));
-      },
+  get: () => ({
+    list: (sessionId) => {
+      slowCalls.push(sessionId);
+      return new Promise((resolve) => setTimeout(() => resolve({ ok: true, value: [{ name: 'git' }] }), 5));
     },
-  },
+  }),
 });
 const [raceA, raceB] = await Promise.all([slowFor('s1'), slowFor('s1')]);
 assert.equal(slowCalls.length, 1, 'concurrent rosters share one fetch');
 assert.ok(raceA.has('git') && raceB.has('git'), 'neither concurrent caller sees the fallback instead of the live names');
+
 const noRemote = slash.createSlashReservations({});
 const degradedReserved = await noRemote('s1');
 assert.ok(degradedReserved.has('plan'), 'a client without a command directory still reserves the shipped names');
 const failingRemote = slash.createSlashReservations({
-  remote: { commands: { list: async () => ({ ok: false, error: { code: 'internal', message: 'nope' } }) } },
+  get: () => ({ list: async () => ({ ok: false, error: { code: 'internal', message: 'nope' } }) }),
 });
 assert.ok((await failingRemote('s1')).has('compact'), 'a failed roster call degrades to the fallback instead of throwing');
 const throwingRemote = slash.createSlashReservations({
-  remote: { commands: { list: async () => { throw new Error('offline'); } } },
+  get: () => ({ list: async () => { throw new Error('offline'); } }),
 });
 assert.ok((await throwingRemote('s1')).has('plan'), 'a throwing roster call degrades to the fallback');
+
+// The shipped cordis context gates service *properties*: reading `ctx.remote`
+// without an `inject` entry throws `can not get property "remote" without
+// inject`, and the plugin's activation gate deliberately does not include it.
+// Only `ctx.get` may be used, and nothing may escape into the adjudication.
+const gatedContext = new Proxy({ get: () => undefined }, {
+  get(target, key) {
+    if (key in target) return target[key];
+    throw new Error(`can not get property "${String(key)}" without inject`);
+  },
+});
+const gatedReserved = await slash.createSlashReservations(gatedContext)('s1');
+assert.ok(gatedReserved.has('plan'), 'a cordis-gated context degrades to the fallback instead of throwing');
+const throwingGet = slash.createSlashReservations({
+  get: () => {
+    throw new Error('can not get property "remote" without inject');
+  },
+});
+assert.ok((await throwingGet('s1')).has('plan'), 'a throwing get() still resolves to the fallback');
+assert.equal(
+  await slash.createSlashReservations({ get: () => undefined })('s1').then((names) => typeof names.has),
+  'function',
+  'the fallback is always a Set',
+);
 log('slash: the reserved-name roster merges the host directory with the fallback');
 
 const zhDict = slash.dictionaries.zh;
