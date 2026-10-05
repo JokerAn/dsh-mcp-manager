@@ -33,6 +33,13 @@ const SOURCE = readFileSync(CLIENT_PATH, 'utf8');
 const CATALOG = JSON.parse(readFileSync(CATALOG_PATH, 'utf8'));
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
+/** Drain timers and immediates: the slash source defers its submit by two ticks. */
+const flushTimers = async () => {
+  for (let index = 0; index < 6; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await settle();
+  }
+};
 /** Re-alien values created inside the vm context for strict cross-realm comparison. */
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const log = (message) => console.log('  ' + message);
@@ -1837,5 +1844,272 @@ const okHtml = healthyHarness.render(
 );
 assert.ok(okHtml.includes('healthy'), 'the boundary passes healthy children through');
 log('error boundary: crashed subtree degrades to a localized message');
+
+// ---------------------------------------------------------------------------
+// 10. Slash source — `/serverName [task]` composes one MCP-scoped instruction
+// ---------------------------------------------------------------------------
+
+const slash = boot({ rpc: async () => ({ ok: true, value: { servers: [] } }) }).moduleExports.internals;
+
+// The three spellings the trigger tokenizer can produce all normalize to the
+// server name: it skips a `/` that follows a word char and treats `//` as dead.
+assert.equal(slash.slashQueryName('frontend-code-skimmer'), 'frontend-code-skimmer', 'plain query');
+assert.equal(slash.slashQueryName('/frontend-code-skimmer'), 'frontend-code-skimmer', 'a doubled slash still normalizes');
+assert.equal(slash.slashQueryName('@jokeran/frontend-code-skimmer'), 'frontend-code-skimmer', 'an npm-scoped spelling normalizes');
+assert.equal(slash.slashQueryName('  @scope/pkg  '), 'pkg', 'surrounding whitespace is ignored');
+assert.equal(slash.slashQueryName(''), '', 'an empty query stays empty');
+assert.equal(slash.toolPrefixOf('skimmer'), 'mcp__skimmer__', 'the tool prefix matches the mcp-client shape');
+log('slash: the three accepted spellings normalize to the server name');
+
+const SERVER_ROWS = [
+  { id: 'a', name: 'frontend-code-skimmer', label: '前端代码罗盘', transport: 'stdio', status: 'connected' },
+  { id: 'b', name: 'java-repo-skimmer', label: 'java-repo-skimmer', transport: 'stdio', status: 'disabled' },
+  { id: 'c', name: 'obscura', label: 'obscura', transport: 'streamable-http', status: 'error' },
+];
+const rpcWith = (calls, servers = SERVER_ROWS, fail = false) => async (channel, endpoint) => {
+  calls.push({ channel, endpoint });
+  if (fail) throw new Error('boom');
+  return { ok: true, value: { servers } };
+};
+
+// -- pure pieces -------------------------------------------------------------
+const ranked = slash.rankSlashServers(SERVER_ROWS, 'java');
+assert.equal(ranked.length, 1, 'ranking keeps only matches');
+assert.equal(ranked[0].name, 'java-repo-skimmer', 'a prefix match wins');
+assert.equal(slash.rankSlashServers(SERVER_ROWS, '').length, 3, 'an empty query keeps every server');
+assert.equal(slash.rankSlashServers(SERVER_ROWS, 'fsk').length, 1, 'a subsequence still matches');
+assert.equal(slash.rankSlashServers(SERVER_ROWS, 'fsk')[0].name, 'frontend-code-skimmer', 'the subsequence hit is the right server');
+assert.equal(slash.rankSlashServers(SERVER_ROWS, 'nope').length, 0, 'a miss returns nothing');
+assert.equal(slash.rankSlashServers(SERVER_ROWS, '前端').length, 1, 'the display name is searchable too');
+assert.equal(slash.rankSlashServers(SERVER_ROWS, '前端')[0].name, 'frontend-code-skimmer', 'the label match returns its server');
+
+const parsed = slash.parseSlashLine('/frontend-code-skimmer 分析一下 vue2click', SERVER_ROWS);
+assert.equal(parsed.server.name, 'frontend-code-skimmer', 'the first token selects the server');
+assert.equal(parsed.task, '分析一下 vue2click', 'the rest of the line is the task');
+assert.equal(slash.parseSlashLine('/frontend-code-skimmer', SERVER_ROWS).task, '', 'a bare command carries no task');
+assert.equal(slash.parseSlashLine('//frontend-code-skimmer 干活', SERVER_ROWS).task, '干活', 'the doubled-slash spelling parses');
+assert.equal(slash.parseSlashLine('/@jokeran/frontend-code-skimmer 干活', SERVER_ROWS).task, '干活', 'the scoped spelling parses');
+assert.equal(slash.parseSlashLine('/plan now', SERVER_ROWS), null, 'an unknown name is not claimed');
+assert.equal(slash.parseSlashLine('hello', SERVER_ROWS), null, 'a line without a leading slash is not claimed');
+assert.equal(slash.parseSlashLine('/frontend-code-skimmerX', SERVER_ROWS), null, 'a name prefix does not match');
+
+// A server may legally be named after a built-in command. `order` only sorts the
+// menu — Enter arbitration polls sources in registration order — so the line has
+// to be yielded explicitly.
+const COLLIDING_ROWS = SERVER_ROWS.concat([
+  { id: 'd', name: 'plan', label: 'plan', transport: 'stdio', status: 'connected' },
+]);
+assert.equal(slash.parseSlashLine('/plan 排个计划', COLLIDING_ROWS).server.name, 'plan', 'without a guard the colliding name would be claimed');
+assert.equal(slash.parseSlashLine('/plan 排个计划', COLLIDING_ROWS, new Set(['plan'])), null, 'a reserved name is left to its own source');
+assert.equal(slash.parseSlashLine('/PLAN 排个计划', COLLIDING_ROWS, new Set(['plan'])), null, 'the reservation is case-insensitive');
+assert.equal(slash.parseSlashLine('/frontend-code-skimmer x', COLLIDING_ROWS, new Set(['plan'])).server.name, 'frontend-code-skimmer', 'a non-reserved server still parses');
+assert.equal(slash.parseSlashLine('/frontend-code-skimmer x', COLLIDING_ROWS, []).server.name, 'frontend-code-skimmer', 'a non-Set reservation is ignored');
+log('slash: ranking and command-line parsing behave');
+
+// -- reservation roster ------------------------------------------------------
+assert.ok(slash.fallbackReservedCommands.includes('plan'), 'the shipped command names are the fallback');
+assert.ok(slash.fallbackReservedCommands.includes('file'), 'the client-side /file contribution is covered too');
+const reservedCalls = [];
+const reservedCtx = {
+  remote: {
+    commands: {
+      list: async (sessionId) => {
+        reservedCalls.push(sessionId);
+        return { ok: true, value: [{ name: 'git' }, { name: 'plan' }] };
+      },
+    },
+  },
+};
+const reservedFor = slash.createSlashReservations(reservedCtx);
+const reservedNames = await reservedFor('s1');
+assert.ok(reservedNames.has('git'), 'a plugin-registered host command is reserved');
+assert.ok(reservedNames.has('plan'), 'the fallback names survive the merge');
+await reservedFor('s1');
+assert.equal(reservedCalls.length, 1, 'the host roster is cached per session');
+await reservedFor('s2');
+assert.equal(reservedCalls.length, 2, 'a different session gets its own roster');
+// A concurrent call must join the pending fetch, never read the fallback early.
+const slowCalls = [];
+const slowFor = slash.createSlashReservations({
+  remote: {
+    commands: {
+      list: (sessionId) => {
+        slowCalls.push(sessionId);
+        return new Promise((resolve) => setTimeout(() => resolve({ ok: true, value: [{ name: 'git' }] }), 5));
+      },
+    },
+  },
+});
+const [raceA, raceB] = await Promise.all([slowFor('s1'), slowFor('s1')]);
+assert.equal(slowCalls.length, 1, 'concurrent rosters share one fetch');
+assert.ok(raceA.has('git') && raceB.has('git'), 'neither concurrent caller sees the fallback instead of the live names');
+const noRemote = slash.createSlashReservations({});
+const degradedReserved = await noRemote('s1');
+assert.ok(degradedReserved.has('plan'), 'a client without a command directory still reserves the shipped names');
+const failingRemote = slash.createSlashReservations({
+  remote: { commands: { list: async () => ({ ok: false, error: { code: 'internal', message: 'nope' } }) } },
+});
+assert.ok((await failingRemote('s1')).has('compact'), 'a failed roster call degrades to the fallback instead of throwing');
+const throwingRemote = slash.createSlashReservations({
+  remote: { commands: { list: async () => { throw new Error('offline'); } } },
+});
+assert.ok((await throwingRemote('s1')).has('plan'), 'a throwing roster call degrades to the fallback');
+log('slash: the reserved-name roster merges the host directory with the fallback');
+
+const zhDict = slash.dictionaries.zh;
+const tSlash = (key, params) => {
+  const value = zhDict[key];
+  if (typeof value !== 'string') return key;
+  if (!params) return value;
+  return value.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match));
+};
+const promptWithTask = slash.buildSlashPrompt(tSlash, SERVER_ROWS[0], '分析 vue2click');
+assert.ok(promptWithTask.includes('frontend-code-skimmer'), 'the prompt names the server');
+assert.ok(promptWithTask.includes('mcp__frontend-code-skimmer__'), 'the prompt quotes the tool prefix');
+assert.ok(promptWithTask.includes('分析 vue2click'), 'the prompt carries the task');
+const promptBare = slash.buildSlashPrompt(tSlash, SERVER_ROWS[0], '');
+assert.ok(!promptBare.includes('{task}'), 'the bare prompt has no placeholder left');
+assert.ok(promptBare.includes('mcp__frontend-code-skimmer__'), 'the bare prompt still scopes the tool prefix');
+log('slash: the composed instruction names the server and its tool prefix');
+
+// -- directory cache ---------------------------------------------------------
+const cacheCalls = [];
+const directory = slash.createSlashDirectory({ list: rpcWith(cacheCalls) });
+const firstLoad = await directory.load();
+assert.equal(firstLoad.length, 3, 'the first load reads the host list');
+assert.equal(firstLoad[0].name, 'frontend-code-skimmer', 'rows are normalized for the menu');
+assert.equal(cacheCalls.length, 1, 'the first load issues one RPC');
+await directory.load();
+assert.equal(cacheCalls.length, 1, 'a second read inside the window is served from cache');
+const concurrent = await Promise.all([directory.load(true), directory.load(true)]);
+assert.equal(concurrent[1].length, 3, 'a concurrent forced reload still resolves');
+assert.equal(cacheCalls.length, 2, 'a concurrent forced reload is de-duplicated into one RPC');
+assert.equal(await directory.load(true) && cacheCalls.length, 3, 'a later forced reload does hit the host again');
+
+const failing = slash.createSlashDirectory({ list: rpcWith([], [], true) });
+assert.deepEqual(plain(await failing.load()), [], 'a failing first load yields an empty menu, not a throw');
+assert.deepEqual(plain(await failing.load(true)), [], 'a failing first load never throws on a retry either');
+
+// A failure after a good read must keep the last good list, so a transient
+// host error cannot blank the menu.
+let flaky = true;
+const degradedDirectory = slash.createSlashDirectory({
+  list: async (channel, endpoint) => {
+    if (flaky) return { ok: true, value: { servers: SERVER_ROWS } };
+    throw new Error('host went away');
+  },
+});
+assert.equal((await degradedDirectory.load()).length, 3, 'the first read succeeds');
+flaky = false;
+assert.equal((await degradedDirectory.load(true)).length, 3, 'a failed refresh keeps the previous list');
+log('slash: the server directory caches, de-duplicates and degrades quietly');
+
+// -- registration + the full Enter path --------------------------------------
+function createSlashHarness(options = {}) {
+  const sources = [];
+  const disposers = [];
+  const services = new Map();
+  let draft = null;
+  const submitted = [];
+  const inputFace = {
+    setDraft(text) {
+      draft = text;
+    },
+    submit() {
+      submitted.push(draft);
+    },
+  };
+  const actx = {
+    get(name) {
+      return name === 'conversation' ? { input: { for: () => inputFace } } : undefined;
+    },
+  };
+  services.set('sessions', { scope: (id) => (id === 's1' ? actx : undefined) });
+  services.set('inputTriggers', {
+    registerSource(source) {
+      sources.push(source);
+      return () => {};
+    },
+  });
+  const ctx = {
+    get: (name) => services.get(name),
+    effect(callback) {
+      disposers.push(callback());
+      return () => {};
+    },
+  };
+  const calls = [];
+  const client = { list: options.list || rpcWith(calls) };
+  const ok = slash.registerMcpSlashSource(ctx, client, tSlash);
+  return { ok, sources, disposers, submitted, calls, getDraft: () => draft };
+}
+
+const harness = createSlashHarness();
+assert.equal(harness.ok, true, 'the source registers when the trigger service is present');
+assert.equal(harness.sources.length, 1, 'exactly one source is registered');
+const source = harness.sources[0];
+assert.equal(source.trigger, '/', 'the source owns the slash trigger');
+assert.equal(source.order, 3, 'it yields to host commands (0) and skills (2)');
+assert.equal(source.name, 'mcp', 'the source is named for its group');
+assert.equal(harness.disposers.length, 1, 'registration rides one effect');
+
+const rows = await source.candidates({ sessionId: 's1' }, { query: '' });
+assert.equal(rows.length, 3, 'a bare slash lists every installed server');
+assert.equal(rows[0].name, 'frontend-code-skimmer', 'the row name is the typeable server name');
+assert.equal(rows[0].label, '前端代码罗盘', 'a custom display name becomes the row title');
+assert.equal(rows[1].label, undefined, 'an unchanged label is left out so the name is the title');
+assert.equal(rows[0].section, zhDict.slashGroup, 'rows carry their own localized section title');
+assert.ok(rows[0].description.includes('已连接'), 'the row reports the settled status');
+assert.ok(rows[0].description.includes('STDIO'), 'the row reports the transport');
+assert.ok(rows[2].description.includes('HTTP'), 'a remote server shows the HTTP transport');
+const scopedRows = await source.candidates({ sessionId: 's1' }, { query: '@jokeran/frontend-code-skimmer' });
+assert.equal(scopedRows.length, 1, 'the scoped spelling finds the server in the menu');
+const aborted = new AbortController();
+aborted.abort();
+assert.deepEqual(plain(await source.candidates({ sessionId: 's1' }, { query: '', signal: aborted.signal })), [], 'an aborted fetch publishes no rows');
+
+assert.deepEqual(plain(await source.onPick({ candidate: { name: 'obscura' }, action: 'pick' })), { text: '/obscura ' }, 'a bare pick completes the spelling');
+assert.equal(source.onPick({ candidate: { name: 'obscura' }, action: 'drill' }), undefined, 'a drill is not ours');
+assert.equal(source.onPick({ candidate: {}, action: 'pick' }), undefined, 'a nameless candidate is ignored');
+
+assert.equal(await source.matchEnter({ sessionId: 's1' }, '/plan now'), undefined, 'a host command line is left alone');
+assert.equal(await source.matchEnter({ sessionId: 's1' }, 'just text'), undefined, 'an ordinary line is left alone');
+
+const handled = await source.matchEnter({ sessionId: 's1' }, '/frontend-code-skimmer 分析 vue2click');
+assert.equal(handled, 'handled', 'a line naming a server is consumed');
+await flushTimers();
+assert.equal(harness.submitted.length, 1, 'the composed instruction is submitted once');
+assert.ok(harness.submitted[0].includes('mcp__frontend-code-skimmer__'), 'the submitted turn scopes the tool prefix');
+assert.ok(harness.submitted[0].includes('分析 vue2click'), 'the submitted turn carries the typed task');
+
+const bareHarness = createSlashHarness();
+const bareSource = bareHarness.sources[0];
+assert.equal(await bareSource.matchEnter({ sessionId: 's1' }, '/obscura'), 'handled', 'a bare server line is consumed');
+await flushTimers();
+assert.equal(bareHarness.submitted.length, 1, 'a task-less command still submits one turn');
+assert.ok(bareHarness.submitted[0].includes('mcp__obscura__'), 'the task-less turn still names the prefix');
+
+const orphanHarness = createSlashHarness();
+assert.equal(await orphanHarness.sources[0].matchEnter({ sessionId: 'gone' }, '/obscura x'), 'handled', 'an unknown session is still consumed');
+await flushTimers();
+assert.equal(orphanHarness.submitted.length, 0, 'an unresolvable session submits nothing instead of throwing');
+
+// A server named exactly like a built-in command must not steal that line.
+const collideHarness = createSlashHarness({ list: rpcWith([], COLLIDING_ROWS) });
+assert.equal(await collideHarness.sources[0].matchEnter({ sessionId: 's1' }, '/plan 排个计划'), undefined, 'a server named /plan yields the line');
+await flushTimers();
+assert.equal(collideHarness.submitted.length, 0, 'no turn is submitted for a reserved name');
+assert.equal(await collideHarness.sources[0].matchEnter({ sessionId: 's1' }, '/obscura x'), 'handled', 'a non-reserved server is still claimed in the same session');
+await flushTimers();
+assert.equal(collideHarness.submitted.length, 1, 'that turn is submitted exactly once');
+
+// A client without the trigger pipeline (or without lazy services) must not throw.
+assert.equal(slash.registerMcpSlashSource({}, { list: async () => ({ ok: true, value: {} }) }, tSlash), false, 'a context without get() is refused');
+assert.equal(
+  slash.registerMcpSlashSource({ get: () => undefined, effect: () => {} }, { list: async () => ({ ok: true, value: {} }) }, tSlash),
+  false,
+  'a client without the trigger service is refused',
+);
+log('slash: registration, menu rows and the Enter path all behave');
 
 console.log('client tests passed');

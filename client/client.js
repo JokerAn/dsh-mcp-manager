@@ -112,6 +112,9 @@ window.__ModuleLoader__.load({
       statusError: '错误',
       statusDisabled: '已停用',
       statusLoading: '连接中',
+      slashGroup: 'MCP 服务器',
+      slashPrompt: '请使用 MCP 服务器「{name}」提供的工具（工具名前缀 {prefix}）完成任务：{task}',
+      slashPromptEmpty: '请使用 MCP 服务器「{name}」提供的工具（工具名前缀 {prefix}）来完成我接下来的任务。',
       enable: '启用',
       disable: '停用',
       edit: '编辑',
@@ -255,6 +258,9 @@ window.__ModuleLoader__.load({
       statusError: 'Error',
       statusDisabled: 'Disabled',
       statusLoading: 'Connecting',
+      slashGroup: 'MCP servers',
+      slashPrompt: 'Use the tools of the MCP server "{name}" (tool-name prefix {prefix}) to complete this task: {task}',
+      slashPromptEmpty: 'Use the tools of the MCP server "{name}" (tool-name prefix {prefix}) to complete my next task.',
       enable: 'Enable',
       disable: 'Disable',
       edit: 'Edit',
@@ -1949,6 +1955,377 @@ window.__ModuleLoader__.load({
     }
 
     // ---------------------------------------------------------------------
+    // Slash source — `/` followed by an installed server name (contract §10)
+    // ---------------------------------------------------------------------
+
+    /** Server-list cache window for the slash source: at most one RPC per window. */
+    const SLASH_CACHE_MS = 2000;
+    /** Menu rows the source publishes for one query. */
+    const SLASH_MAX_ROWS = 20;
+    /** Host-command roster cache window for one session. */
+    const SLASH_RESERVED_MS = 10000;
+
+    /**
+     * `/` names another source already owns. The live host command directory is
+     * authoritative (`createSlashReservations`); this is the fallback for a
+     * client whose directory call is unavailable, and it also covers the shipped
+     * client-side contributions the host directory does not list.
+     */
+    const FALLBACK_RESERVED_COMMANDS = Object.freeze([
+      'compact', 'export', 'feedback', 'file', 'goal', 'model', 'permission', 'plan',
+    ]);
+
+    /** The mcp-client's published tool-name shape, quoted verbatim to the model. */
+    function toolPrefixOf(serverName) {
+      return 'mcp__' + serverName + '__';
+    }
+
+    /**
+     * Normalize one typed slash token to a comparable server name. All three
+     * spellings the trigger tokenizer can produce are accepted, because its
+     * backward scan skips a `/` that follows a word char and treats a `/` after
+     * another `/` as dead (the URL carve-out), leaving the raw text in `query`:
+     *
+     *   `/frontend-code-skimmer`  → `frontend-code-skimmer`
+     *   `//frontend-code-skimmer` → `frontend-code-skimmer`
+     *   `/@jokeran/skimmer`       → `skimmer`
+     *
+     * @param raw - the query text after the triggering slash.
+     * @returns the comparable name (may be empty).
+     */
+    function slashQueryName(raw) {
+      let text = asString(raw).trim();
+      while (text.charAt(0) === '/') text = text.slice(1);
+      const cut = text.lastIndexOf('/');
+      if (text.charAt(0) === '@' && cut > 0) text = text.slice(cut + 1);
+      return text;
+    }
+
+    /** Case-insensitive in-order match: the menu's weakest ranking tier. */
+    function isSubsequence(needle, haystack) {
+      let at = 0;
+      for (let index = 0; index < haystack.length && at < needle.length; index += 1) {
+        if (haystack.charAt(index) === needle.charAt(at)) at += 1;
+      }
+      return at === needle.length;
+    }
+
+    /**
+     * Rank installed servers against a typed query. An empty query keeps the
+     * caller's order; otherwise exact > prefix > substring > subsequence, with
+     * the server name settling ties so rows never reshuffle between keystrokes.
+     *
+     * @param servers - normalized servers.
+     * @param query - the normalized query text.
+     * @returns the matching servers in menu order.
+     */
+    function rankSlashServers(servers, query) {
+      const needle = asString(query).toLowerCase();
+      if (!needle) return asArray(servers);
+      const scored = [];
+      for (const server of asArray(servers)) {
+        const name = asString(server.name);
+        if (!name) continue;
+        let score = -1;
+        for (const field of [name.toLowerCase(), asString(server.label).toLowerCase()]) {
+          if (!field) continue;
+          if (field === needle) score = Math.max(score, 100);
+          else if (field.startsWith(needle)) score = Math.max(score, 80);
+          else if (field.indexOf(needle) !== -1) score = Math.max(score, 60);
+          else if (isSubsequence(needle, field)) score = Math.max(score, 30);
+        }
+        if (score >= 0) scored.push({ server, score, name });
+      }
+      scored.sort((left, right) => (right.score - left.score) || left.name.localeCompare(right.name));
+      return scored.map((row) => row.server);
+    }
+
+    /** `STDIO · 已连接` — transport plus settled status for one menu row. */
+    function slashServerDetail(t, server) {
+      const transport = asRecord(server).transport === 'streamable-http' ? t('transportHttp') : t('transportStdio');
+      return transport + ' · ' + t(statusKey(asString(asRecord(server).status)));
+    }
+
+    /**
+     * The instruction one command hands to the model: it names the server and
+     * its tool-name prefix, so the turn is scoped to that MCP without claiming
+     * the other servers' tools are unavailable.
+     *
+     * @param t - dictionary-bound translate thunk.
+     * @param server - the addressed server.
+     * @param task - the text typed after the command, or ''.
+     * @returns the prompt text.
+     */
+    function buildSlashPrompt(t, server, task) {
+      const name = asString(asRecord(server).name);
+      const params = { name, prefix: toolPrefixOf(name) };
+      const text = asString(task).trim();
+      return text ? t('slashPrompt', Object.assign({ task: text }, params)) : t('slashPromptEmpty', params);
+    }
+
+    /**
+     * Parse one full command line `/name[ task]` addressed to an installed
+     * server. A first token that names no server — or that names a command some
+     * other `/` source owns — yields null, which leaves the line to that source.
+     *
+     * @param line - the whole draft submitted with Enter.
+     * @param servers - normalized servers.
+     * @param reserved - lowercase names other sources own (optional).
+     * @returns `{ server, task }`, or null.
+     */
+    function parseSlashLine(line, servers, reserved) {
+      const text = asString(line);
+      if (text.charAt(0) !== '/') return null;
+      const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(text);
+      if (match === null) return null;
+      const typed = slashQueryName(match[1]);
+      if (!typed) return null;
+      const needle = typed.toLowerCase();
+      if (reserved !== undefined && reserved !== null && typeof reserved.has === 'function' && reserved.has(needle)) return null;
+      for (const server of asArray(servers)) {
+        if (asString(asRecord(server).name).toLowerCase() === needle) {
+          return { server, task: asString(match[2]).trim() };
+        }
+      }
+      return null;
+    }
+
+    /**
+     * Build the per-session set of `/` names another source already owns.
+     *
+     * The source's `order` only sorts the *menu*: Enter arbitration polls
+     * sources' `matchEnter` in **registration** order, which this plugin cannot
+     * control, so without this guard a server named `plan` would steal `/plan`.
+     * The host command directory is the authoritative list; a client that
+     * cannot reach it falls back to the shipped names.
+     *
+     * @param ctx - the browser plugin context.
+     * @returns `(sessionId) => Promise<Set<string>>` of lowercase names.
+     */
+    function createSlashReservations(ctx) {
+      const cache = new Map();
+      function fetch(sessionId) {
+        const commands = asRecord(asRecord(asRecord(ctx).remote).commands);
+        if (typeof commands.list !== 'function') return Promise.resolve(new Set(FALLBACK_RESERVED_COMMANDS));
+        return Promise.resolve()
+          .then(() => commands.list(sessionId))
+          .then((result) => {
+            const names = new Set(FALLBACK_RESERVED_COMMANDS);
+            if (result && result.ok === true) {
+              for (const raw of asArray(result.value)) {
+                const name = asString(asRecord(raw).name).toLowerCase();
+                if (name) names.add(name);
+              }
+            }
+            return names;
+          }, () => new Set(FALLBACK_RESERVED_COMMANDS));
+      }
+      return function reserved(sessionId) {
+        const hit = cache.get(sessionId);
+        const now = Date.now();
+        if (hit !== undefined) {
+          if (now - hit.at < SLASH_RESERVED_MS) return Promise.resolve(hit.names);
+          if (hit.pending !== undefined) return hit.pending;
+        }
+        const pending = fetch(sessionId).then((names) => {
+          cache.set(sessionId, { at: Date.now(), names });
+          return names;
+        }, () => {
+          const names = hit === undefined ? new Set(FALLBACK_RESERVED_COMMANDS) : hit.names;
+          cache.set(sessionId, { at: Date.now(), names });
+          return names;
+        });
+        // `at: 0` keeps the placeholder out of the fresh window, so a concurrent
+        // caller joins the pending fetch instead of reading the fallback.
+        cache.set(sessionId, {
+          at: 0,
+          names: hit === undefined ? new Set(FALLBACK_RESERVED_COMMANDS) : hit.names,
+          pending,
+        });
+        return pending;
+      };
+    }
+
+    /**
+     * Lazily cached view of the Host's server list for the slash source: one
+     * RPC per window with in-flight de-duplication, and a failed refresh keeps
+     * the previous list so the menu never empties on a transient error.
+     *
+     * @param client - the RPC client built by `createClient`.
+     * @returns `{ load(force), invalidate() }`.
+     */
+    function createSlashDirectory(client) {
+      let cached = null;
+      let cachedAt = 0;
+      let inflight = null;
+      function settle() {
+        inflight = null;
+        return cached === null ? [] : cached;
+      }
+      return {
+        load(force) {
+          const now = Date.now();
+          if (force !== true && cached !== null && now - cachedAt < SLASH_CACHE_MS) return Promise.resolve(cached);
+          if (inflight !== null) return inflight;
+          inflight = Promise.resolve()
+            .then(() => client.list())
+            .then((result) => {
+              if (result && result.ok) {
+                cached = asArray(asRecord(result.value).servers).map(normalizeServer);
+                cachedAt = Date.now();
+              }
+              return settle();
+            }, () => settle());
+          return inflight;
+        },
+        invalidate() {
+          cached = null;
+          cachedAt = 0;
+        },
+      };
+    }
+
+    /** One macrotask, with a microtask fallback for contexts without timers. */
+    function defer(callback) {
+      if (typeof setTimeout === 'function') setTimeout(callback, 0);
+      else Promise.resolve().then(callback);
+    }
+
+    /**
+     * Deliver one composed instruction to the composer and send it as an
+     * ordinary message.
+     *
+     * Both steps defer one macrotask. The Enter adjudication that produced the
+     * line is still inside its own submit transaction, whose settle clears the
+     * draft — writing earlier would be overwritten; the second deferral lets
+     * the editor's discrete update publish before `submit()` reads the draft
+     * snapshot. Every failure is contained: a missing composer leaves the draft
+     * untouched instead of breaking the input pipeline.
+     *
+     * @param get - context service resolver.
+     * @param sessionId - the receiving session.
+     * @param prompt - the instruction to send.
+     */
+    function submitSlashPrompt(get, sessionId, prompt) {
+      defer(() => {
+        let input;
+        try {
+          const sessions = get('sessions');
+          const actx = sessions && typeof sessions.scope === 'function' ? sessions.scope(sessionId) : undefined;
+          const conversation = actx && typeof actx.get === 'function' ? actx.get('conversation') : undefined;
+          const hub = conversation && conversation.input;
+          input = hub && typeof hub.for === 'function' ? hub.for(actx) : undefined;
+        } catch (error) {
+          return;
+        }
+        if (!input) return;
+        // Prefer the documented provide-channel action face; the shell also
+        // carries the same two verbs as methods, so either identity works.
+        const actions = input.actions && typeof input.actions.setDraft === 'function' ? input.actions : input;
+        if (typeof actions.setDraft !== 'function') return;
+        try {
+          actions.setDraft(prompt);
+        } catch (error) {
+          return;
+        }
+        defer(() => {
+          try {
+            if (typeof actions.submit === 'function') actions.submit();
+          } catch (error) {
+            // Contained: a session torn down between draft and submit.
+          }
+        });
+      });
+    }
+
+    /**
+     * Register the client's `/` source for installed MCP servers (contract §10).
+     *
+     * The source is optional infrastructure: it mounts only when the Web client
+     * exposes the input-trigger pipeline, and every callback is contained so a
+     * failure can never break the composer. It is ordered after the host command
+     * registry (0) and the skill source (2), so `/plan` and a skill whose name
+     * collides with a server always win the Enter arbitration; a line whose
+     * first token names no installed server is not claimed at all.
+     *
+     * @param ctx - the browser plugin context.
+     * @param client - the RPC client built by `createClient`.
+     * @param t - dictionary-bound translate thunk.
+     * @returns true when the source was registered.
+     */
+    function registerMcpSlashSource(ctx, client, t) {
+      const get = typeof ctx.get === 'function' ? ctx.get.bind(ctx) : null;
+      if (get === null) return false;
+      const inputTriggers = get('inputTriggers');
+      if (!inputTriggers || typeof inputTriggers.registerSource !== 'function') return false;
+      const directory = createSlashDirectory(client);
+      const reserved = createSlashReservations(ctx);
+
+      const source = {
+        trigger: '/',
+        name: 'mcp',
+        order: 3,
+        warm() {
+          directory.load().catch(() => {});
+        },
+        async candidates(session, request) {
+          const req = asRecord(request);
+          const servers = await directory.load();
+          if (req.signal && req.signal.aborted === true) return [];
+          return rankSlashServers(servers, slashQueryName(req.query))
+            .slice(0, SLASH_MAX_ROWS)
+            .map((server) => {
+              const row = {
+                name: asString(server.name),
+                section: t('slashGroup'),
+                description: slashServerDetail(t, server),
+              };
+              // A custom display name becomes the row title, and the server name
+              // stays visible as the alias the user can also type.
+              const label = asString(server.label);
+              if (label && label.toLowerCase() !== row.name.toLowerCase()) row.label = label;
+              return row;
+            });
+        },
+        matchEnter(session, line) {
+          const sessionId = asString(asRecord(session).sessionId);
+          if (!sessionId) return undefined;
+          // Both rosters are already warm from the menu and from the previous
+          // Enter, so the common path resolves without a round trip.
+          return Promise.all([directory.load(), reserved(sessionId)]).then((pair) => {
+            const parsed = parseSlashLine(line, pair[0], pair[1]);
+            if (parsed === null) return undefined;
+            submitSlashPrompt(get, sessionId, buildSlashPrompt(t, parsed.server, parsed.task));
+            return 'handled';
+          }, () => undefined);
+        },
+        onPick(pick) {
+          const request = asRecord(pick);
+          if (asString(request.action) === 'drill') return undefined;
+          const name = asString(asRecord(request.candidate).name);
+          if (!name) return undefined;
+          // A bare pick completes the spelling and hands the draft back: the
+          // user adds the task, and Enter runs `matchEnter` above. The trailing
+          // space closes the menu without reopening it.
+          return { text: '/' + name + ' ' };
+        },
+      };
+
+      if (typeof ctx.effect !== 'function') {
+        inputTriggers.registerSource(source);
+        return true;
+      }
+      ctx.effect(() => {
+        const unregister = inputTriggers.registerSource(source);
+        return () => {
+          if (typeof unregister === 'function') unregister();
+          directory.invalidate();
+        };
+      }, 'dsh-mcp-manager: slash source');
+      return true;
+    }
+
+    // ---------------------------------------------------------------------
     // The tab
     // ---------------------------------------------------------------------
 
@@ -2515,6 +2892,14 @@ window.__ModuleLoader__.load({
         label: () => t('tab'),
         locale: NS,
       }, DshmcpMcpManagerTab));
+      // Optional: the `/` source that turns `/‹serverName› ‹task›` into one
+      // instruction naming that server's tool prefix (contract §10). A client
+      // without the trigger pipeline keeps the settings tab only.
+      try {
+        registerMcpSlashSource(ctx, client, t);
+      } catch (error) {
+        // Contained: a missing service must never block the settings tab.
+      }
     }
 
     module.exports.name = '@local/dsh-mcp-manager';
@@ -2535,6 +2920,17 @@ window.__ModuleLoader__.load({
       dictionaries: { zh, en },
       errorKeys: ERROR_KEYS,
       ErrorBoundary: DshmcpErrorBoundary,
+      // §10: the slash source's pure pieces, so a harness can exercise the
+      // token spellings, the ranking and the cache without a live client.
+      slashQueryName,
+      rankSlashServers,
+      parseSlashLine,
+      buildSlashPrompt,
+      createSlashDirectory,
+      createSlashReservations,
+      registerMcpSlashSource,
+      toolPrefixOf,
+      fallbackReservedCommands: FALLBACK_RESERVED_COMMANDS,
     });
     return module.exports;
   },

@@ -86,6 +86,12 @@ DeepSeek Harness 原生已经能读写文件、跑 bash、抓网页、搜网络 
 - **Streamable HTTP**：URL + 请求头
 - 手动添加时若只填了包名，表单会给出「填入 `-y <pkg>`」一键按钮，省得你猜 `npx` 参数
 
+### 斜杠唤起
+- **装完即出现在 `/` 列表**：每台服务器一行，无需为每个 MCP 写 skill
+- **`/名称 任务` 一次回车**：自动组成一条指定该 MCP 工具前缀的指令并发出
+- **三种写法都认**：`/name`、`//name`、`/@scope/name`
+- **不抢已有命令**：回车前查宿主命令目录，与内置命令同名时让位
+
 ---
 
 ## 安装
@@ -147,6 +153,27 @@ plugin_manager install_bundle
 装完**无需重启**即可使用：服务器的工具会以 `mcp__<serverName>__<toolName>` 注册给模型。
 
 例如装好 `everything` 后直接说「用 echo 工具回个话」，模型就能调用 `mcp__everything__echo`。
+
+### 斜杠唤起：`/服务器名 任务`
+每装一个 MCP，输入框的 `/` 列表里就**自动多一行**同名命令，不需要为每个 MCP 手写 skill：
+
+```
+/frontend-code-skimmer 用 skimmer 分析 vue2click 这个项目的提交按钮
+```
+
+回车后，这一轮会被替换成一条明确指定该 MCP 的指令（含它的工具名前缀 `mcp__frontend-code-skimmer__`），然后正常发给模型。也可以只打 `/frontend-code-skimmer`：光标停在命令后面，补上任务再回车。
+
+三种写法都认：
+
+| 写法 | 说明 |
+|---|---|
+| `/frontend-code-skimmer` | 推荐，与服务器名一致 |
+| `//frontend-code-skimmer` | 触发器的 URL 豁免规则让第二个斜杠保留在查询里 |
+| `/@jokeran/frontend-code-skimmer` | npm 包名写法，`@scope/` 会被自动剥掉 |
+
+列表行会显示自定义的**显示名称**作为标题、服务器名作为别名，右侧是「传输方式 · 状态」。行数上限 20。
+
+**不会抢内置命令**：菜单里内置命令与 skill 排在前面；回车时还会查一次宿主命令目录，若服务器名与 `/plan`、`/model` 这类已有命令同名，该行会让给原命令（否则一个叫 `plan` 的服务器会悄悄废掉 `/plan`）。
 
 ---
 
